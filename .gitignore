@@ -1,3 +1,6 @@
+# Added DS_Store files  -  Chathura 
+*.DS_Store
+
 # History files
 .Rhistory
 .Rapp.history
