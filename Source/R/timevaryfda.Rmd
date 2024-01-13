@@ -1,0 +1,1338 @@
+---
+title: "timavaringfda"
+author: "Xiaoxia Champon"
+date: "2022-10-14"
+output: html_document
+---
+
+
+```{r}
+library(SLFPCA)
+```
+
+
+
+
+```{r}
+#Generate data
+n <- 100
+npc <- 1
+interval <- c(0, 10)
+gridequal <- seq(0, 10, length.out = 51)
+basis <- fda::create.bspline.basis(c(0, 10), nbasis = 13, norder = 4,
+         breaks = seq(0, 10, length.out = 11))
+meanfun <- function(t){2 * sin(pi * t/5)/sqrt(5)}
+lambda_1 <- 3^2 #the first eigenvalue
+score <- cbind(rnorm(n, 0, sqrt(lambda_1)))
+eigfun <- list()
+eigfun[[1]] <- function(t){cos(pi * t/5)/sqrt(5)}
+eigfd <- list()
+for(i in 1:npc){
+  eigfd[[i]] <- fda::smooth.basis(gridequal, eigfun[[i]](gridequal), basis)$fd
+}
+
+```
+
+
+```{r}
+DataNew <- GenBinaryFD(n, interval, sparse = 8:12, regular = FALSE,
+           meanfun = meanfun, score, eigfd)
+
+```
+
+
+```{r}
+SLFPCA_list <- SLFPCA(DataNew$Ly, DataNew$Lt, interval, npc, L_list = 13,norder = 4, kappa_theta = 0.2, sparse_pen = 0, kappa_mu = 0)
+
+```
+
+
+```{r}
+evaluated_values=fda::eval.basis(gridequal,basis) #51 * 13
+plot(gridequal,evaluated_values%*%c(SLFPCA_list$mufd[[1]]))
+lines(SLFPCA_list$mufd)
+```
+
+```{r}
+plot(SLFPCA_list$mufd)
+```
+
+
+```{r}
+plot(SLFPCA_list$eigfd_list[[1]])
+```
+
+###try the real data. 112 users
+```{r}
+war_isarel = read.csv("full_isarel_112top_users.csv")
+```
+
+```{r}
+table(war_isarel$Sentiment)/sum(table(war_isarel$Sentiment))
+```
+
+```{r}
+war_isarel$date= as.numeric(as.POSIXct(c(war_isarel$Date),"%Y-%m-%d %H:%M:%S",tz="EST"))
+```
+
+
+
+```{r}
+war_isarel$date01= (war_isarel$date-min(war_isarel$date))/(max(war_isarel$date)-min((war_isarel$date)))
+```
+
+
+```{r}
+author_names = unique(war_isarel$Author)
+Ylist <- list()
+timelist <- list()
+for (author_index in 1:length(author_names)){
+  Ylist[[author_index]]=war_isarel[war_isarel$Author==author_names[author_index],"Sentiment"]
+  Ylist[[author_index]][Ylist[[author_index]]=="negative"] <- 0
+  Ylist[[author_index]][Ylist[[author_index]]=="neutral"] <- 1
+  #Ylist[[author_index]][Ylist[[author_index]]=="positive"] <- 2
+  Ylist[[author_index]][Ylist[[author_index]]=="positive"] <- 1
+  
+  timelist[[author_index]]=war_isarel[war_isarel$Author==author_names[author_index],"date01"]
+ 
+  
+  if ((length(unique(c((Ylist[[author_index]]))))==1) || ((length(unique(c((Ylist[[author_index]]))))>1) && (max(table(Ylist[[author_index]])[[1]],table(Ylist[[author_index]])[[2]])/sum(table(Ylist[[author_index]])[[1]],table(Ylist[[author_index]])[[2]])>0.97))){
+    Ylist[[author_index]]=NA 
+     timelist[[author_index]]=NA}
+ Ylist[[author_index]]=as.numeric(unlist(Ylist[[author_index]]))
+ timelist[[author_index]]=as.numeric(unlist(timelist[[author_index]]))
+ 
+
+  }
+
+```
+
+
+```{r}
+Ylist_complete=Filter(Negate(anyNA),Ylist)
+timelist_complete=Filter(Negate(anyNA),timelist)
+```
+
+
+
+```{r}
+prop_one = matrix(0,ncol=2,nrow=109)
+for (i in 1:109){
+  prop_one[i,] =table(Ylist_complete[[i]])/sum(table(Ylist_complete[[i]]))
+  colnames(prop_one)=c("% of 0","% of 1")
+}
+prop_one
+```
+
+
+```{r}
+apply(prop_one,2,mean)
+```
+
+
+```{r}
+# Getting initial value for coefficients of the eigenfunctions and scores
+init_eig_setting <- function(Ly, Lt, bwmu, bwcov, xout, npc, basis){
+
+  n <- length(Lt)
+  Lq <- lapply(Ly, function(x){2 * x - 1})
+
+  gridobs <- sort(unique(unlist(Lt)))
+  mufine_est <- fdapace::Lwls1D(bw = bwmu, kernel_type = "epan", xin = sort(unlist(Lt)),
+                                yin = unlist(Lq)[order(unlist(Lt))], xout = gridobs)
+
+  Lq_cen <- list()
+  for(i in 1:n){
+    Lq_cen[[i]] <- Lq[[i]] - mufine_est[match(Lt[[i]], gridobs)]
+  }
+  xin2D <- NULL
+  yin2D <- NULL
+  for(i in 1:n){
+    xin2D <- rbind(xin2D, t(utils::combn(Lt[[i]], 2)))
+    yin2D <- rbind(yin2D, t(utils::combn(Lq_cen[[i]], 2)))
+  }
+  xin_pair <- rbind(xin2D, cbind(xin2D[,2], xin2D[,1]))
+  yin_pair <- yin2D[,1] * yin2D[, 2]
+  yin_pair <- c(yin_pair, yin_pair)
+  covfun_est <- fdapace::Lwls2D(bw = bwcov, kern = "epan", xin = xin_pair, yin = yin_pair,
+                                xout1 = xout, xout2 = xout)
+
+  eigfun_est <- eigen(covfun_est)$vectors[,1:npc]
+  eigfd_est <- fda::smooth.basis(xout, eigfun_est, basis)$fd
+  Theta_est <- t(eigfd_est$coefs)
+
+  eigfd_adj <- list()
+  eigval <- eigen(covfun_est)$values[1:npc]
+  for(i in 1:npc){
+    multi_eig <- as.numeric(fda::inprod(eigfd_est[i], eigfd_est[i]))
+    eigfd_adj[[i]] <- eigfd_est[i] * multi_eig^(-1/2)
+    Theta_est[i,] <- Theta_est[i,] * multi_eig^(-1/2)
+    eigval[i] <- eigval[i] * multi_eig
+  }
+
+  score_est <- matrix(0, nrow = n, ncol = npc)
+
+  init <- list()
+  init$Theta_est <- Theta_est
+  init$score_est <- score_est
+
+  return(init)
+}
+
+
+```
+
+
+
+```{r}
+# Getting initial value for coefficients of the mean functions
+init_mu_setting <- function(Ly, Lt, bw, xout, basis){
+  Lq <- lapply(Ly, function(x){2 * x - 1})
+  mufun_est <- fdapace::Lwls1D(bw = bw, kernel_type = "epan", xin = sort(unlist(Lt)),
+                               yin = unlist(Lq)[order(unlist(Lt))], xout = xout)
+  mufd_est <- fda::smooth.basis(xout, mufun_est, basis)$fd
+  return(mufd_est$coefs)
+}
+```
+
+
+
+```{r}
+library(MASS)
+#for ginv function
+# SLFPCA_sub_mod <- function(Ly, Lt, interval, npc, nknots, norder, kappa_theta, sparse_pen,
+#                        nRegGrid = 51, bwmu_init = 0.5, bwcov_init = 1, kappa_mu,
+#                        itermax = 100, tol = 10){
+####modified BBinv=solve(t(B) %*% B) to general inverse
+SLFPCA_sub_mod <- function(Ly, Lt, interval, npc, nknots, norder, kappa_theta, sparse_pen,
+                       nRegGrid = 10, bwmu_init = 0.5, bwcov_init = 1, kappa_mu,
+                       itermax = 100, tol = 10){
+  n <- length(Ly)
+  start_time <- interval[1]
+  end_time <- interval[2]
+  gridequal <- seq(start_time, end_time, length.out = nRegGrid)
+  Lq <- lapply(Ly, function(x){2 * x - 1})
+
+  #B-spline
+  basis_mod <- fda::create.bspline.basis(interval, nbasis = nknots + norder, norder = norder,
+                                         breaks = seq(start_time, end_time, length.out = nknots + 2))
+  B_der <- fda::bsplinepen(basis_mod)
+  B <- splines::bs(x = unlist(Lt), degree = norder - 1, knots = seq(start_time, end_time, length.out = nknots + 2)[-c(1, nknots + 2)],
+                   intercept = T)
+  L <- ncol(B)
+  #BBinv <- solve(t(B) %*% B)
+  BBinv = ginv(t(B) %*% B)
+
+  Blist <- list()
+  index <- 1
+  for(i in 1:n){
+    Blist[[i]] <- B[index:(index + length(Lt[[i]]) - 1),]
+    index <- index + length(Lt[[i]])
+  }
+
+  ####### initial value settings####################
+  # mean function
+  mu_ini <- init_mu_setting(Ly, Lt, bw = bwmu_init, xout = gridequal, basis = basis_mod)
+
+  # eigenfunctions and scores
+  init_eig <- init_eig_setting(Ly, Lt, bwmu = bwmu_init, bwcov = bwcov_init, xout = gridequal,
+                               npc = npc, basis = basis_mod)
+  Theta_ini <- init_eig$Theta_est
+  score_ini <- init_eig$score_est
+
+
+  #################Estimation###################
+  BICscore <- array(0, c(length(kappa_mu), length(sparse_pen), length(kappa_theta)))
+  mu_res <- array(0, c(L, length(kappa_mu), length(sparse_pen), length(kappa_theta)))
+  score_res <- array(0, c(n, npc, length(kappa_mu), length(sparse_pen), length(kappa_theta)))
+  Theta_res <- array(0, c(npc, L, length(kappa_mu), length(sparse_pen), length(kappa_theta)))
+
+  for(mm in 1:length(kappa_mu)){
+    for(ii in 1:length(sparse_pen)){
+      for(jj in 1:length(kappa_theta)){
+
+        print(paste("Tuning parameters: kappa_theta = ", kappa_theta[jj],
+                    ",  sparse_pen = ", sparse_pen[ii], ", kappa_mu = ",
+                    kappa_mu[mm], sep = ""))
+
+        mu_est <- mu_ini
+        Theta_est <- Theta_ini
+        score_est <- score_ini
+
+        loglike_loop <- NULL
+        loop <- 1
+        while(loop <= itermax){ # outer loop
+
+          ################estimation of mean function#######################
+          # Compute Xtilde
+          Btheta <- NULL
+          Bmu <- NULL
+          for(i in 1:n){
+            Bmu <- c(Bmu, Blist[[i]] %*% mu_est)
+            Btheta <- c(Btheta, Blist[[i]] %*% t(Theta_est) %*% score_est[i,])
+          }
+          Delta <- Bmu + Btheta
+
+          loglike <- -sum(log(linkfun(unlist(Lq) * Delta)))
+
+          XX <- Delta + 4 * unlist(Lq) * (1 - linkfun(unlist(Lq) * Delta))
+
+          Xtilde <- XX - Btheta
+
+          # estimate
+          sum_m <- nrow(B)
+          mu_est <- solve(t(B) %*% B + sum_m * kappa_mu[mm] * B_der) %*% t(B) %*% Xtilde
+
+          #################estimation of scores and eigenfunctions###################
+          df <- NULL
+
+          for(k in 1:npc){
+
+            Bthetasub <- NULL
+            for(i in 1:n){
+              Bthetasub <- c(Bthetasub, Blist[[i]] %*% t(Theta_est)[,-k] %*% score_est[i, -k])
+            }
+            Xk <- XX - B %*% mu_est - Bthetasub
+
+            m <- 1
+            while(m <= itermax){
+
+              ## score estimation
+              phi_est <- B %*% Theta_est[k,]
+
+              index <- 1
+              for(i in 1:n){
+                range <- index:(index + length(Lt[[i]]) - 1)
+                score_est[i,k] <- sum(phi_est[range] * Xk[range])/sum(phi_est[range]^2)
+                index <- index + length(Lt[[i]])
+              }
+              nanid <- which(is.nan(score_est[,k]))
+              score_est[nanid, k] <- mean(score_est[,k], na.rm = T)
+
+              ## eigenfunction estimation
+              U <- matrix(0, nrow = 1, ncol = L)
+              Ulist <- list()
+              for(i in 1:n){
+                Ulist[[i]] <- score_est[i, k] * Blist[[i]]
+                U <- rbind(U, Ulist[[i]])
+              }
+              U <- U[-1,]
+              Theta_est[k,] <- tryCatch(slos_temp(Xk, U, Maxiter = 100, lambda = sparse_pen[ii],
+                                                  gamma = kappa_theta[jj], beta.basis = basis_mod,
+                                                  absTol = 0.0004, Cutoff = 0),
+                                        error = function(err){return(rep(Inf, nknots + norder))})
+              if(sum(Theta_est[k,]) == Inf){
+                Theta_est[k,] <- rep(0.5, nknots + norder)
+                break
+              }
+
+              ## negative loglikelihood
+              loglike_old <- loglike
+
+              Btheta <- NULL
+              Bmu <- NULL
+              for(i in 1:n){
+                Bmu <- c(Bmu, Blist[[i]] %*% mu_est)
+                Btheta <- c(Btheta, Blist[[i]] %*% t(Theta_est) %*% score_est[i,])
+              }
+              Delta <- Bmu + Btheta
+              loglike <- -sum(log(linkfun(unlist(Lq) * Delta)))
+
+              # cat(ii, " ", jj, "  ", k, "  ", m, "  ", loglike, "\n")
+
+              if(abs(loglike - loglike_old) < tol){
+                break
+              }
+
+              m <- m + 1
+
+            }
+
+            ####df
+            if(sum(abs(diff(c(Theta_est[k,])))) == 0){
+              df[k] <- Inf
+              break
+            }else{
+              sparse.idx = which(Theta_est[k,] == 0)
+              if(length(sparse.idx) == 0)
+              {
+                ula = U
+                vla = B_der
+              }
+              else{
+                ula  = U[, -sparse.idx]
+                vla  = B_der[-sparse.idx, -sparse.idx]
+              }
+              hat2 = ula%*%solve(t(ula)%*%ula + sum_m * kappa_theta[jj]*vla)%*%t(ula)
+              df[k]  = psych::tr(hat2)
+            }
+
+          }
+
+          if(sum(df) == Inf){
+            break
+          }
+
+          loglike_loop[loop] <- loglike
+          if(loop != 1){
+
+            if((abs(loglike_loop[loop] - loglike_loop[loop - 1]) < tol)|(loglike_loop[loop] > loglike_loop[loop - 1])){
+              break
+            }
+
+          }
+
+          print(loop)
+          print(loglike_loop[loop])
+          loop <- loop + 1
+
+        }
+
+        mu_res[, mm, ii, jj] <- mu_est
+        score_res[, , mm, ii, jj] <- score_est
+        Theta_res[, , mm, ii, jj] <- Theta_est
+
+        #BIC
+        BICscore[mm, ii, jj] <- 2 * loglike + log(length(unlist(Lt))) * sum(df) +
+          0.5 * sum(df) * log(npc * (nknots + norder) + n * npc)
+
+
+      }
+
+    }
+
+  }
+
+  ######choose tuning parameters that achieve lowest BIC score#############
+  mm <- which(BICscore == min(BICscore), arr.ind = T)[1]
+  ii <- which(BICscore == min(BICscore), arr.ind = T)[2]
+  jj <- which(BICscore == min(BICscore), arr.ind = T)[3]
+  mu_est <- mu_res[, mm, ii, jj]
+  Theta_est <- as.matrix(Theta_res[, , mm, ii, jj])
+  score_est <- as.matrix(score_res[, , mm, ii, jj])
+
+  B_reg <- splines::bs(x = gridequal, degree = norder - 1,
+                       knots = seq(start_time, end_time, length.out = nknots + 2)[-c(1, nknots + 2)],
+                       intercept = T)
+  mufd_est <- fda::smooth.basis(gridequal, B_reg %*% mu_est, basis_mod)$fd
+  if(npc == 1){
+    eigfd_est <- fda::smooth.basis(gridequal, B_reg %*% Theta_est, basis_mod)$fd
+  }else{
+    eigfd_est <- fda::smooth.basis(gridequal, B_reg %*% t(Theta_est), basis_mod)$fd
+  }
+  multi <- NULL
+  eigfd_est_st <- list()
+  for(i in 1:npc){
+    multi[i] <- sqrt(as.numeric(fda::inprod(eigfd_est[i], eigfd_est[i])))
+    eigfd_est_st[[i]] <- eigfd_est[i] * (1/multi[i])
+    score_est[,i] <- score_est[,i] * multi[i]
+  }
+
+  ret <- list()
+
+  ret$mufd <- mufd_est
+  ret$eigfd_list <- eigfd_est_st
+  ret$score <- score_est
+  ret$kappa_mu <- kappa_mu[mm]
+  ret$kappa_theta <- kappa_theta[jj]
+  ret$sparse_pen <- sparse_pen[ii]
+  ret$EBICscore <- BICscore[mm, ii, jj]
+
+  return(ret)
+
+}
+
+
+
+```
+
+
+```{r}
+SLFPCA_mod=function (Ly, Lt, interval, npc, L_list, norder, kappa_theta, 
+    sparse_pen, nRegGrid = 51, bwmu_init = 0.5, bwcov_init = 1, 
+    kappa_mu, itermax = 100, tol = 10) 
+{
+    EBICscore <- NULL
+    SLFPCA_l <- list()
+    for (l_id in 1:length(L_list)) {
+        nknots <- L_list[l_id] - norder
+        SLFPCA_l[[l_id]] <- SLFPCA_sub_mod(Ly, Lt, interval, npc, 
+            nknots, norder, kappa_theta, sparse_pen, nRegGrid, 
+            bwmu_init, bwcov_init, kappa_mu, itermax, tol)
+        EBICscore[l_id] <- SLFPCA_l[[l_id]]$EBICscore
+        print(paste("L =", L_list[l_id]))
+    }
+    l_id_select <- which.min(EBICscore)
+    L_select <- L_list[l_id_select]
+    SLFPCA_ret <- SLFPCA_l[[l_id_select]]
+    ret <- list()
+    ret$mufd <- SLFPCA_ret$mufd
+    ret$eigfd_list <- SLFPCA_ret$eigfd_list
+    ret$score <- SLFPCA_ret$score
+    ret$kappa_mu <- SLFPCA_ret$kappa_mu
+    ret$kappa_theta <- SLFPCA_ret$kappa_theta
+    ret$sparse_pen <- SLFPCA_ret$sparse_pen
+    ret$L_select <- L_select
+    ret$EBICscore <- EBICscore
+    return(ret)
+}
+```
+
+```{r}
+# Some functions for binary case
+linkfun <- function(x){
+  1 - 1/(exp(x) + 1)
+}
+
+linkinv <- function(p){
+  log(p/(1-p))
+}
+
+linkder <- function(x){
+  t <- exp(x)
+  t/(t + 1)^2
+}
+```
+
+
+```{r}
+# Some functions about fSCAD penalty, refer to the code of Lin et al. (2017) with some modifications
+slos_temp = function(Y, U, Maxiter, lambda, gamma, beta.basis, absTol, Cutoff)
+{
+  sum_m = length(Y)
+
+  # beta b-spline basis
+  rng = fda::getbasisrange(beta.basis)
+  breaks = c(rng[1],beta.basis$params,rng[2])
+  L = beta.basis$nbasis
+  M = length(breaks) - 1
+  norder = L-M+1
+  d = L-M
+
+  L2NNer = sqrt(M/(rng[2]-rng[1]))
+
+  # roughness penalty matrix V
+  V = fda::bsplinepen(beta.basis)
+  VV = sum_m*gamma*V
+
+  # calculate W
+  W = slos.compute.weights(beta.basis)
+
+  # initial estimate of b
+  bHat = solve(t(U)%*%U+VV)%*%t(U)%*%Y
+
+  bTilde = bHat
+
+  if(lambda > 0)
+  {
+    changeThres = absTol
+    bTilde = slosLQA(U,Y,V,bHat,W,gamma,lambda,Maxiter,M,L,L2NNer,absTol,a=3.7)
+    bZero = (abs(bTilde) < Cutoff)
+    bTilde[bZero] = 0
+
+    bNonZero = !bZero
+
+  }
+
+  bTilde
+
+}
+
+#W_j
+slos.compute.weights = function(basis)
+{
+  L       = basis$nbasis
+  rng     = fda::getbasisrange(basis)
+  breaks  = c(rng[1],basis$params,rng[2])
+  M       = length(breaks) - 1
+  norder  = L-M+1
+  W       = array(0,dim=c(norder,norder,M))
+
+  for (j in 1:M)
+  {
+    temp = fda::inprod(basis,basis,rng=c(breaks[j],breaks[j+1]))
+    W[,,j] = temp[j:(j+norder-1),j:(j+norder-1)]
+  }
+  W
+}
+
+# Step 2 in Lin et al. (2017)
+slosLQA = function(U,Y,V,bHat,W,gamma,lambda,Maxiter,M,L,L2NNer,absTol,a)
+{
+  betaNormj = c(0,M)
+  bZeroMat = rep(FALSE,L)
+  betaNorm = Inf
+  sum_m = length(Y)
+
+  bZeroMat[c(1, L)] <- TRUE
+
+  d <- L - M
+
+  it = 1
+  while(it <= Maxiter)
+  {
+    betaNormOld = betaNorm
+    betaNorm = sqrt(sum(bHat^2))
+
+    change = (betaNormOld-betaNorm)^2
+    if(change < absTol) break
+
+    lqaW = NULL
+    lqaWk = matrix(0,L,L)
+    for(j in 1:M)
+    {
+      index = j:(j+d)
+      betaNormj[j] = t(bHat[j:(j+d)])%*%W[,,j]%*%bHat[j:(j+d)]
+      cjk = Dpfunc(sqrt(betaNormj[j])*L2NNer,lambda,a)
+
+      if(cjk != 0)
+      {
+        if(betaNormj[j] < absTol){
+          bZeroMat[index] = TRUE
+        }else{
+          lqaWk[index,index] = lqaWk[index,index] + cjk*(L2NNer/sqrt(betaNormj[j]))*W[,,j]
+        }
+      }
+    }
+
+    lqaW = lqaWk
+    lqaW = lqaW / 2 #W^{(0)}
+
+    bZeroVec = bZeroMat
+    bNonZeroVec = !bZeroVec
+
+    UtU = t(U[,bNonZeroVec])%*%U[,bNonZeroVec]
+    Ut = t(U[,bNonZeroVec])
+    Vp = sum_m*gamma*V[bNonZeroVec,bNonZeroVec]
+
+    theta = solve(UtU+Vp+sum_m*lqaW[bNonZeroVec,bNonZeroVec,drop=F],Ut %*% Y)
+    bHat = matrix(0,length(bNonZeroVec),1)
+    bHat[bNonZeroVec] = theta
+
+    # print(it)
+
+    it = it + 1
+  }
+  bHat
+}
+
+# SCAD function
+Dpfunc = function(u,lambda,a)
+{
+  if(u<=lambda) Dpval = lambda
+  else if(u<a*lambda) Dpval = -(u-a*lambda)/(a-1)
+  else Dpval = 0
+  Dpval
+}
+
+
+
+```
+
+
+
+
+
+
+```{r}
+npc_isarel = 1
+#options(warn=-1)
+start_slfpca=Sys.time()
+interval_isarel =c (0,1)
+SLFPCA_list_isarel <- SLFPCA_mod(Ylist_complete, timelist_complete, interval_isarel, npc_isarel, L_list = 13, norder = 4, kappa_theta = 0.2, sparse_pen = 0, kappa_mu = 0)
+end_slfpca=Sys.time()
+slfpca_time=end_slfpca-start_slfpca
+slfpca_time
+```
+```{r}
+gridequal_isarel <- seq(0, 1, length.out = 51)
+basis_isarel <- fda::create.bspline.basis(c(0, 1), nbasis = 13, norder = 4,breaks = seq(0, 1, length.out = 11))
+
+evaluated_values_isarel=fda::eval.basis(gridequal_isarel,basis_isarel) #51 * 13
+plot(gridequal_isarel,evaluated_values_isarel%*%c(SLFPCA_list_isarel$mufd[[1]]))
+lines(SLFPCA_list_isarel$mufd,col="red")
+```
+
+
+```{r}
+plot(SLFPCA_list_isarel$mufd)
+```
+
+```{r}
+plot(SLFPCA_list_isarel$eigfd_list[[1]])
+```
+
+
+
+
+```{r}
+less_tweets_authors_data_sentiment = read.csv("less_tweets_authors_data_sentiment.csv")
+```
+
+```{r}
+table(less_tweets_authors_data_sentiment$Sentiment)/sum(table(less_tweets_authors_data_sentiment$Sentiment))
+```
+
+```{r}
+less_tweets_authors_data_sentiment$date= as.numeric(as.POSIXct(c(less_tweets_authors_data_sentiment$Date),"%Y-%m-%d %H:%M:%S",tz="EST"))
+```
+
+
+
+```{r}
+less_tweets_authors_data_sentiment$date01= (less_tweets_authors_data_sentiment$date-min(less_tweets_authors_data_sentiment$date))/(max(less_tweets_authors_data_sentiment$date)-min((less_tweets_authors_data_sentiment$date)))
+```
+
+
+```{r}
+author_names_less_tweets = unique(less_tweets_authors_data_sentiment$Author)
+Ylist_less_tweets <- list()
+timelist_less_tweets <- list()
+for (author_index in 1:length(author_names_less_tweets)){
+  Ylist_less_tweets[[author_index]]=less_tweets_authors_data_sentiment[less_tweets_authors_data_sentiment$Author==author_names_less_tweets[author_index],"Sentiment"]
+  Ylist_less_tweets[[author_index]][Ylist_less_tweets[[author_index]]=="negative"] <- 0
+  Ylist_less_tweets[[author_index]][Ylist_less_tweets[[author_index]]=="neutral"] <- 1
+  #Ylist[[author_index]][Ylist[[author_index]]=="positive"] <- 2
+  Ylist_less_tweets[[author_index]][Ylist_less_tweets[[author_index]]=="positive"] <- 1
+  
+  timelist_less_tweets[[author_index]]=less_tweets_authors_data_sentiment[less_tweets_authors_data_sentiment$Author==author_names_less_tweets[author_index],"date01"]
+ 
+  
+  if ((length(unique(c((Ylist_less_tweets[[author_index]]))))==1) || ((length(unique(c((Ylist_less_tweets[[author_index]]))))>1) && (max(table(Ylist_less_tweets[[author_index]])[[1]],table(Ylist_less_tweets[[author_index]])[[2]])/sum(table(Ylist_less_tweets[[author_index]])[[1]],table(Ylist_less_tweets[[author_index]])[[2]])>0.97))){
+    Ylist_less_tweets[[author_index]]=NA 
+     timelist_less_tweets[[author_index]]=NA}
+ Ylist_less_tweets[[author_index]]=as.numeric(unlist(Ylist_less_tweets[[author_index]]))
+ timelist_less_tweets[[author_index]]=as.numeric(unlist(timelist_less_tweets[[author_index]]))
+ 
+
+  }
+
+```
+
+
+```{r}
+Ylist_complete_less_tweets=Filter(Negate(anyNA),Ylist_less_tweets)
+timelist_complete_less_tweets=Filter(Negate(anyNA),timelist_less_tweets)
+```
+
+
+```{r}
+npc_isarel_less_tweets = 2
+#options(warn=-1)
+start_slfpca_less_tweets=Sys.time()
+interval_isarel =c (0,1)
+SLFPCA_list_isarel_less_tweets <- SLFPCA_mod(Ylist_complete_less_tweets, timelist_complete_less_tweets, interval_isarel, npc_isarel_less_tweets, L_list = 13, norder = 4, kappa_theta = 0.2, sparse_pen = 0, kappa_mu = 0)
+end_slfpca_less_tweets=Sys.time()
+slfpca_time_less_tweets=end_slfpca_less_tweets-start_slfpca_less_tweets
+slfpca_time_less_tweets
+```
+
+```{r}
+plot(SLFPCA_list_isarel_less_tweets$mufd)
+```
+
+
+```{r}
+plot(SLFPCA_list_isarel_less_tweets$eigfd_list[[1]])
+```
+
+```{r}
+plot(SLFPCA_list_isarel_less_tweets$eigfd_list[[2]])
+```
+
+```{r}
+slfpca_score = SLFPCA_list_isarel_less_tweets$score
+plot(slfpca_score[,1],slfpca_score[,2])
+```
+
+```{r}
+library(NbClust)
+kmeans_cluster <- function(data=scores_K){
+  out_kmeans = NbClust::NbClust(data = data, diss = NULL,
+                                distance = "euclidean", min.nc = 2, max.nc = 5,
+                                method = "kmeans",index="silhouette")
+  
+  return(list(nclust=as.numeric(out_kmeans$Best.nc[1]), label = out_kmeans$Best.partition))
+}
+kmeans_result =kmeans_cluster(slfpca_score)$label
+
+nonna_index = c(2,3,4,5,10,12, 13,14,15,20,23,26, 28,29, 30,31,33,34,35,36,38, 40,41,42,43,46,47,48,49,
+                52, 55,57,85,86,88,91,97,101, 106, 108)
+author_names_less_tweets_nona = author_names_less_tweets[nonna_index ]
+clustering_data = data.frame(slfpca_score , kmeans_result,author_names_less_tweets_nona)
+colnames(clustering_data) = c("Score1","Score2","Cluster","Author")
+
+library(ggplot2)
+kmeans_plot = ggplot(clustering_data,aes(x=Score1, y= Score2, label = Author, color=as.factor(Cluster) ))+
+              geom_point(size =4)+
+              theme(text = element_text(size = 20))  +
+              guides(color=guide_legend(title="Cluster"))+
+              theme(legend.position = c(0.1, 0.8))+
+              geom_text(aes(color=factor(Cluster)),vjust = -0.5, size = 4)
+kmeans_plot
+```
+
+```{r}
+less_tweets_authors_data_sentiment_subset40 = less_tweets_authors_data_sentiment[less_tweets_authors_data_sentiment$Author %in% author_names_less_tweets_nona,][,c("Date","Author","Sentiment")]
+write.csv(less_tweets_authors_data_sentiment_subset40,"/Users/xzhao17/less_tweets_authors_data_sentiment_subset40.csv",row.names=FALSE)
+```
+#This is the markov chain data :transition data
+```{r}
+all_user_traisition= read.csv("/Users/xzhao17/Documents/GitHub/Kronos/ObservableData/negative_neutral/Date_Trans_Count_negative_neutral.csv")
+```
+
+
+```{r}
+head(all_user_traisition)
+```
+
+```{r}
+time_stamp_all_user = unique(all_user_traisition$Date)
+length(time_stamp_all_user)
+```
+
+
+```{r}
+wide_all_user = reshape(all_user_traisition, idvar = "Trans", timevar = "Date", direction = "wide")
+```
+
+
+```{r}
+dim(wide_all_user)
+```
+
+
+
+
+```{r}
+wide_all_user[1:4,1:10]
+```
+
+```{r}
+time_isarel=as.numeric(as.POSIXct(strptime(time_stamp_all_user,"%Y-%m-%d %H:%M:%S")))
+```
+
+
+
+
+
+```{r}
+library(mgcViz)
+library(mgcv)
+transition_fit= function(type_of_transition){
+  type_of_transition<-gam(unlist(wide_all_user[wide_all_user$Trans==type_of_transition,-1])~s(time_isarel,bs = "cr", m=2, k = 25),
+                         method ="ML",
+                   control=list(maxit = 500,mgcv.tol=1e-4,epsilon = 1e-04),
+                   optimizer=c("outer","bfgs"),data=wide_all_user) 
+type_of_transition_model=getViz(type_of_transition)
+print(plot(type_of_transition_model, allTerms = T), pages = 1)
+}
+
+```
+
+
+```{r}
+as.POSIXct(1697000000, origin = "1970-01-01")
+```
+
+```{r}
+as.POSIXct(1697500000, origin = "1970-01-01")
+```
+
+
+```{r}
+transition_fit("negative_to_negative")
+transition_fit("neutral_to_neutral")
+transition_fit("neutral_to_negative")
+transition_fit("negative_to_neutral")
+```
+
+#mfaces
+```{r}
+library(mfaces)
+
+```
+#get the data in the correct structure
+#in_negative_neutral 62,63,63,64 individuals. 362 time points
+```{r}
+negative_to_negative_individual=read.csv("/Users/xzhao17/Documents/GitHub/Kronos/ObservableData/negative_neutral/Author_Counts_overtime_for_negative_to_negative_in_negative_neutral.csv")
+negative_to_neutral_individual=read.csv("/Users/xzhao17/Documents/GitHub/Kronos/ObservableData/negative_neutral/Author_Counts_overtime_for_negative_to_neutral_in_negative_neutral.csv")
+neutral_to_neutral_individual=read.csv("/Users/xzhao17/Documents/GitHub/Kronos/ObservableData/negative_neutral/Author_Counts_overtime_for_neutral_to_negative_in_negative_neutral.csv")
+neutral_to_negative_individual=read.csv("/Users/xzhao17/Documents/GitHub/Kronos/ObservableData/negative_neutral/Author_Counts_overtime_for_neutral_to_neutral_in_negative_neutral.csv")
+```
+
+
+#find common users 108, 110, 110, 111 users, 362 columns in total, first column is the author name
+```{r}
+negative_to_negative_individual_full=read.csv("/Users/xzhao17/Documents/GitHub/Kronos/ObservableData/negative_neutral_positive/Author_Counts_overtime_for_negative_to_negative_in_negative_neutral_positive.csv",check.names = FALSE)
+negative_to_neutral_individual_full=read.csv("/Users/xzhao17/Documents/GitHub/Kronos/ObservableData/negative_neutral_positive/Author_Counts_overtime_for_negative_to_neutral_in_negative_neutral_positive.csv",check.names = FALSE)
+neutral_to_neutral_individual_full=read.csv("/Users/xzhao17/Documents/GitHub/Kronos/ObservableData/negative_neutral_positive/Author_Counts_overtime_for_neutral_to_negative_in_negative_neutral_positive.csv",check.names = FALSE)
+neutral_to_negative_individual_full=read.csv("/Users/xzhao17/Documents/GitHub/Kronos/ObservableData/negative_neutral_positive/Author_Counts_overtime_for_neutral_to_neutral_in_negative_neutral_positive.csv",check.names = FALSE)
+```
+
+
+```{r}
+all_authors_list=negative_to_negative_individual_full$Author
+#function to subset the users
+subset_users=function(authors_list,data_input){
+  data_input_new=data_input[data_input$Author %in% authors_list,]
+  data_input_new
+}
+negative_to_neutral_individual_full_new=subset_users(all_authors_list,negative_to_neutral_individual_full)
+neutral_to_neutral_individual_full_new=subset_users(all_authors_list,neutral_to_neutral_individual_full)
+neutral_to_negative_individual_full_new=subset_users(all_authors_list,neutral_to_negative_individual_full)
+```
+
+
+
+
+```{r}
+subdata=negative_to_negative_individual_full[1:5,2:50]
+```
+
+
+```{r}
+sub_time=list()
+  for (i in 1:5){
+  sub_time[[i]]=as.numeric(as.POSIXct(strptime(noquote(colnames(subdata[i,])[which(subdata[i,]>0)]),"%Y-%m-%d %H:%M:%S")))
+}
+
+sub_time
+```
+
+
+
+```{r}
+sub_values=list()
+for (i in 1:5){
+  sub_values[[i]]=as.numeric(noquote(subdata[i,][subdata[i,]>0]))
+}
+sub_values
+```
+
+```{r}
+data_for_sub=data.frame(matrix(ncol = 3, nrow = 20))
+colnames(data_for_sub)=c("subj","argvals","y")
+```
+
+
+
+```{r}
+data_for_sub$subj=c(rep(1,length(sub_values[[1]])),
+                    rep(2,length(sub_values[[2]])),
+                    rep(3,length(sub_values[[3]])),
+                    rep(4,length(sub_values[[4]])),
+                    rep(5,length(sub_values[[5]]))
+                    )
+data_for_sub$argvals=unlist(sub_time)
+data_for_sub$y=unlist(sub_values)
+data_for_sub
+```
+
+#example to check the data structure
+```{r}
+smfpca1=negative_to_negative_individual_full[1:num_individuals,-1]
+smfpca1_time=list()
+  for (i in 1:num_individuals){
+  smfpca1_time[[i]]=as.numeric(as.POSIXct(strptime(noquote(colnames(smfpca1[i,])[which(smfpca1[i,]>0)]),"%Y-%m-%d %H:%M:%S")))
+}
+smfpca1_values=list()
+for (i in 1:num_individuals){
+  smfpca1_values[[i]]=as.numeric(noquote(smfpca1[i,][smfpca1[i,]>0]))
+}
+data_for_smfpca1=data.frame(matrix(ncol = 3, nrow = length(unlist(smfpca1_values))))
+colnames(data_for_smfpca1)=c("subj","argvals","y")
+
+
+subj11=c()
+for(i in 1: num_individuals){
+  temp_value=rep(i,length(smfpca1_values[[i]]))
+  subj11 <- c(subj11, temp_value)
+}
+data_for_smfpca1$subj= subj11
+data_for_smfpca1$argvals=unlist(smfpca1_time)
+data_for_smfpca1$y=unlist(smfpca1_values)
+head(data_for_smfpca1)
+```
+
+
+#write a function to get the data for smfpca
+```{r}
+get_smfpca_data=function(input_transition_data){
+  num_individuals=dim(input_transition_data)[1]
+  smfpca_data=input_transition_data[1:num_individuals,-1]
+smfpca_data_time=list()
+  for (i in 1:num_individuals){
+  smfpca_data_time[[i]]=as.numeric(as.POSIXct(strptime(noquote(colnames(smfpca_data[i,])[which(smfpca_data[i,]>0)]),"%Y-%m-%d %H:%M:%S")))
+}
+smfpca_data_values=list()
+for (i in 1:num_individuals){
+  smfpca_data_values[[i]]=as.numeric(noquote(smfpca_data[i,][smfpca_data[i,]>0]))
+}
+data_for_smfpca=data.frame(matrix(ncol = 3, nrow = length(unlist(smfpca_data_values))))
+colnames(data_for_smfpca)=c("subj","argvals","y")
+
+
+subj_vec=c()
+for(i in 1: num_individuals){
+  temp_value=rep(i,length(smfpca_data_values[[i]]))
+  subj_vec <- c(subj_vec, temp_value)
+}
+data_for_smfpca$subj= subj_vec
+data_for_smfpca$argvals=unlist(smfpca_data_time)
+data_for_smfpca$y=unlist(smfpca_data_values)
+data_for_smfpca
+}
+
+```
+
+
+```{r}
+neg_neg_sfpca_data=get_smfpca_data(negative_to_negative_individual_full)
+neg_neut_sfpca_data=get_smfpca_data(negative_to_neutral_individual_full_new)
+neut_neut_sfpca_data=get_smfpca_data(neutral_to_neutral_individual_full_new)
+neut_neg_sfpca_data=get_smfpca_data(neutral_to_negative_individual_full_new)
+
+```
+
+
+
+```{r}
+start_time_sfpca=Sys.time()
+data_isarel_individual <- list("y1" = data.frame("subj"= neg_neg_sfpca_data$subj, "argvals" = neg_neg_sfpca_data$argvals, "y" = neg_neg_sfpca_data$y),
+             "y2" = data.frame("subj"= neg_neut_sfpca_data$subj, "argvals" = neg_neut_sfpca_data$argvals, "y" = neg_neut_sfpca_data$y),
+             "y3" = data.frame("subj"= neut_neut_sfpca_data$subj, "argvals" = neut_neut_sfpca_data$argvals, "y" = neut_neut_sfpca_data$y),
+             "y4" = data.frame("subj"= neut_neg_sfpca_data$subj, "argvals" = neut_neg_sfpca_data$argvals, "y" = neut_neg_sfpca_data$y)
+             ) 
+fit_isarel_individual <- mface.sparse(data_isarel_individual, knots = 10,calculate.scores = TRUE)
+end_time_sfpca=Sys.time()
+time_epalse=end_time_sfpca-start_time_sfpca
+time_epalse #Time difference of 2.391286 mins
+scores_isarel_individual <- fit_isarel_individual$rand_eff$scores #108,5
+```
+#get the prediction for each transitions
+```{r}
+
+neg_neg_sfpca_data_pred=data.frame(matrix(0,ncol=4,nrow=length(neg_neg_sfpca_data$subj)))
+colnames(neg_neg_sfpca_data_pred)=c("predict_value","subjcts","transition_type","time_interval")
+neg_neg_sfpca_data_pred$predict_value=fit_isarel_individual$y.pred$y1
+neg_neg_sfpca_data_pred$subjcts=neg_neg_sfpca_data$subj
+neg_neg_sfpca_data_pred$transition_type=rep("negative_to_negative",dim(neg_neg_sfpca_data_pred)[1])
+neg_neg_sfpca_data_pred$time_interval=as.POSIXct(neg_neg_sfpca_data$argvals,origin = "1970-01-01")
+
+# neg_neut_sfpca_data_pred=fit_isarel_individual$y.pred$y2
+# neg_neut_sfpca_data_pred$su
+# neut_neut_sfpca_data_pred=fit_isarel_individual$y.pred$y3
+# neut_neg_sfpca_data_pred=fit_isarel_individual$y.pred$y4
+```
+
+
+```{r}
+get_prediction_data=function(transition_choice,smfpca_model){
+  if (transition_choice=="negative_to_negative"){
+    smfpca_data=neg_neg_sfpca_data
+  }else if (transition_choice=="negative_to_neutral"){
+    smfpca_data=neg_neut_sfpca_data
+  }else if (transition_choice=="neutral_to_neutral"){
+    smfpca_data=neut_neut_sfpca_data
+  }else{
+    smfpca_data=neut_neg_sfpca_data
+  }
+  
+  sfpca_data_pred=data.frame(matrix(0,ncol=4,nrow=length(smfpca_data$subj)))
+  colnames(sfpca_data_pred)=c("predict_value","subjcts","transition_type","time_interval")
+   if (transition_choice=="negative_to_negative"){
+    sfpca_data_pred$predict_value=smfpca_model$y.pred$y1
+  }else if (transition_choice=="negative_to_neutral"){
+    sfpca_data_pred$predict_value=smfpca_model$y.pred$y2
+  }else if (transition_choice=="neutral_to_neutral"){
+    sfpca_data_pred$predict_value=smfpca_model$y.pred$y3
+  }else{
+    sfpca_data_pred$predict_value=smfpca_model$y.pred$y4
+  }
+  
+  sfpca_data_pred$subjcts=smfpca_data$subj
+  sfpca_data_pred$transition_type=rep(transition_choice,dim(sfpca_data_pred)[1])
+  sfpca_data_pred$time_interval=as.POSIXct(smfpca_data$argvals,origin = "1970-01-01")
+  sfpca_data_pred
+}
+```
+
+
+```{r}
+neg_neg_sfpca_pred=get_prediction_data("negative_to_negative",fit_isarel_individual)
+neg_neut_sfpca_pred=get_prediction_data("negative_to_neutral",fit_isarel_individual)
+neut_neut_sfpca_pred=get_prediction_data("neutral_to_neutral",fit_isarel_individual)
+neut_neg_sfpca_pred=get_prediction_data("neutral_to_negative",fit_isarel_individual)
+```
+
+
+
+```{r}
+neg_neg_sfpca_data_pred_cluster_one=sfpca_pred[neg_neg_sfpca_data_pred$subjcts %in% author_cluster_one_index,]
+ggplot(neg_neg_sfpca_data_pred_cluster_one,aes(x=time_interval,y=predict_value))+
+  geom_line(color = as.factor(neg_neg_sfpca_data_pred_cluster_one$subjcts),show.legend = FALSE)+
+  theme(text = element_text(size = 20))+
+  xlab("")+
+  ylab("Predicted Value")
+  
+```
+
+```{r}
+neg_neg_sfpca_data_pred_cluster_two=neg_neg_sfpca_data_pred[neg_neg_sfpca_data_pred$subjcts %in% author_cluster_two_index,]
+ggplot(neg_neg_sfpca_data_pred_cluster_two,aes(x=time_interval,y=predict_value))+
+  geom_line(color = as.factor(neg_neg_sfpca_data_pred_cluster_two$subjcts),show.legend = FALSE)+
+  theme(text = element_text(size = 20))+
+  xlab("")+
+  ylab("Predicted Value")
+```
+
+
+#kmeans_result
+#         1          2 
+#0.01851852 0.98148148 
+```{r}
+library(NbClust)
+kmeans_cluster <- function(data=scores_K){
+  out_kmeans = NbClust::NbClust(data = data, diss = NULL,
+                                distance = "euclidean", min.nc = 2, max.nc = 5,
+                                method = "kmeans",index="silhouette")
+  
+  return(list(nclust=as.numeric(out_kmeans$Best.nc[1]), label = out_kmeans$Best.partition))
+}
+kmeans_result =kmeans_cluster(scores_isarel_individual)$label
+author_names_less_tweets_nona = all_authors_list
+clustering_data = data.frame(scores_isarel_individual[,c(1,2)] , kmeans_result,author_names_less_tweets_nona)
+colnames(clustering_data) = c("Score1","Score2","Cluster","Author")
+
+library(ggplot2)
+kmeans_plot = ggplot(clustering_data,aes(x=Score1, y= Score2, label = Author, color=as.factor(Cluster) ))+
+              geom_point(size =4)+
+              theme(text = element_text(size = 20))  +
+              guides(color=guide_legend(title="Cluster"))+
+              theme(legend.position = c(0.1, 0.2))+
+              geom_text(aes(color=factor(Cluster)),vjust = -0.5, size = 4)
+kmeans_plot
+```
+
+```{r}
+clustering_data_user_cluster1=clustering_data$Author[clustering_data$Cluster==1]
+clustering_data_user_cluster1
+author_cluster_one_index=which(all_authors_list %in% clustering_data_user_cluster1)
+author_cluster_one_index
+```
+
+#add information about positives
+```{r}
+negative_to_positive_individual_full=read.csv("/Users/xzhao17/Documents/GitHub/Kronos/ObservableData/negative_neutral_positive/Author_Counts_overtime_for_negative_to_positive_in_negative_neutral_positive.csv",check.names = FALSE) #29
+positive_to_negtive_individual_full=read.csv("/Users/xzhao17/Documents/GitHub/Kronos/ObservableData/negative_neutral_positive/Author_Counts_overtime_for_positive_to_negative_in_negative_neutral_positive.csv",check.names = FALSE) #27
+neutral_to_positive_individual_full=read.csv("/Users/xzhao17/Documents/GitHub/Kronos/ObservableData/negative_neutral_positive/Author_Counts_overtime_for_neutral_to_positive_in_negative_neutral_positive.csv",check.names = FALSE) #36
+positive_to_neutral_individual_full=read.csv("/Users/xzhao17/Documents/GitHub/Kronos/ObservableData/negative_neutral_positive/Author_Counts_overtime_for_positive_to_neutral_in_negative_neutral_positive.csv",check.names = FALSE) #34
+positive_to_positive_individual_full=read.csv("/Users/xzhao17/Documents/GitHub/Kronos/ObservableData/negative_neutral_positive/Author_Counts_overtime_for_positive_to_positive_in_negative_neutral_positive.csv",check.names = FALSE) #7
+```
+
+
+
+```{r}
+row_combined_data=rbind(negative_to_positive_individual_full,
+                        positive_to_negtive_individual_full,
+                        neutral_to_positive_individual_full,
+                        positive_to_neutral_individual_full,
+                        positive_to_positive_individual_full)
+
+```
+
+```{r}
+library(dplyr)
+row_combined_data_sum=row_combined_data
+row_combined_data_sum %>% 
+  group_by(Author) %>% 
+  summarise(across(starts_with("2023"), ~sum(., na.rm = TRUE)))
+```
+
+```{r}
+row_combined_data_sum$positive_sums <- rowSums(row_combined_data_sum[, -1])
+row_combined_data_sum_sub=row_combined_data_sum[,c("Author","positive_sums")]
+row_combined_data_sum_sub
+```
+#in total, there are 47 individuals have positive information
+```{r}
+library(data.table)
+positive_proportion <- data.table(row_combined_data_sum_sub)
+positive_proportion_data <- positive_proportion[,list(positive_counts = sum(positive_sums), freq = .N), by = "Author"]
+positive_proportion_data
+```
+
+
+
+```{r}
+war_isarel = read.csv("full_isarel_112top_users.csv")
+```
+
+```{r}
+war_isarel_sub=war_isarel[war_isarel$Author %in% positive_proportion_data$Author,]
+```
+
+
+```{r}
+total_transition_count=table(war_isarel_sub$Author)
+positive_proportion_data$total_sum=as.numeric(total_transition_count)
+positive_proportion_data
+```
+
+```{r}
+positive_proportion_data$positive_proportion=positive_proportion_data$positive_counts/(positive_proportion_data$total_sum-1)
+positive_proportion_data
+```
+
+
+```{r}
+avg_transition_delay_negative_neutral_positive=read.csv("/Users/xzhao17/Documents/GitHub/Kronos/ObservableData/negative_neutral_positive/avg_transition_delay_negative_neutral_positive.csv") #34
+Trans_Count_negative_neutral_positive=read.csv("/Users/xzhao17/Documents/GitHub/Kronos/ObservableData/negative_neutral_positive/Date_Trans_Count_negative_neutral_positive.csv") #7
+```
+
+
+```{r}
+avg_transition_delay_negative_neutral_positive$total_time=rowSums(avg_transition_delay_negative_neutral_positive[,-1],na.rm = TRUE)
+avg_transition_delay_negative_neutral_positive$positive_time=rowSums(avg_transition_delay_negative_neutral_positive[,c("negative_to_positive","neutral_to_positive",
+                                                                                                                       "positive_to_negative","positive_to_neutral",
+                                                                                                                       "positive_to_positive")],na.rm = TRUE)
+avg_transition_delay_negative_neutral_positive$positive_over_total_time=avg_transition_delay_negative_neutral_positive$positive_time/avg_transition_delay_negative_neutral_positive$total_time
+```
+
+```{r}
+avg_transition_delay_negative_neutral_positive
+```
+
+```{r}
+positive_proportion_data$time_proportion=avg_transition_delay_negative_neutral_positive[avg_transition_delay_negative_neutral_positive$Author %in% positive_proportion_data$Author,c("positive_over_total_time")]
+```
+
+```{r}
+positive_proportion_data$positive_time=avg_transition_delay_negative_neutral_positive[avg_transition_delay_negative_neutral_positive$Author %in% positive_proportion_data$Author,"positive_time"]
+positive_proportion_data$total_time=avg_transition_delay_negative_neutral_positive[avg_transition_delay_negative_neutral_positive$Author %in% positive_proportion_data$Author,"total_time"]
+positive_proportion_data
+```
+
+```{r}
+positive_proportion_data$positive_per_unit_time=positive_proportion_data$positive_proportion/positive_proportion_data$time_proportion
+positive_proportion_data
+```
+
+```{r}
+save(positive_proportion_data,file="positive_proportion_data.RData")
+```
+
+
+```{r}
+write.csv(positive_proportion_data,"/Users/xzhao17/Documents/GitHub/Kronos/ObservableData/negative_neutral_positive/positive_proportion_data.csv")
+```
+
+
+
+```{r}
+positive_proportion_data_sub=positive_proportion_data[,c("Author","positive_per_unit_time")]
+positive_proportion_data_sub
+```
+#merge score and positive_proportion_data_sub
+```{r}
+scores_isarel_individual_full=data.frame(scores_isarel_individual)
+scores_isarel_individual_full$Author=clustering_data$Author
+clustering_data_full=merge(scores_isarel_individual_full, positive_proportion_data_sub, by.x = "Author",all.x = TRUE)
+clustering_data_full
+```
+
+```{r}
+clustering_data_full_nona=clustering_data_full
+clustering_data_full_nona[is.na(clustering_data_full_nona)] <- 0
+clustering_data_full_nona
+```
+
+```{r}
+kmeans_result_full =kmeans_cluster(clustering_data_full_nona[,-1])$label
+
+clustering_data_full = data.frame(scores_isarel_individual[,c(1,2)] , kmeans_result_full,all_authors_list)
+colnames(clustering_data_full) = c("Score1","Score2","Cluster","Author")
+
+library(ggplot2)
+kmeans_plot_full = ggplot(clustering_data_full,aes(x=Score1, y= Score2, label = Author, color=as.factor(Cluster) ))+
+              geom_point(size =4)+
+              theme(text = element_text(size = 20))  +
+              guides(color=guide_legend(title="Cluster"))+
+              theme(legend.position = c(0.1, 0.2))+
+              geom_text(aes(color=factor(Cluster)),vjust = -0.5, size = 4)
+kmeans_plot_full
+```
+```{r}
+table(kmeans_result_full)
+cluster_two_users_full=clustering_data_full$Author[clustering_data_full$Cluster==2]
+cluster_two_users_full
+```
+
+
+```{r}
+author_cluster_two_index=which(all_authors_list %in% cluster_two_users_full)
+author_cluster_two_index
+```
+
+
+
+```{r}
+table(kmeans_result_full)/sum(table(kmeans_result_full))
+```
+
+
+```{r}
+library(refund)
+```
+
+#each individual have different time of visit and repetitive
+#MS$visit.time
+#  [1]    0   90  450  804 1237    0  326  512  918 1281    0  230
+# [13]    0  188  525  951 1344    0  109  222  405  915 1413    0
+# [25]  464  519  658  822 1190 1570  
+
+<!-- MS$visit -->
+<!--   [1] 1 2 3 4 5 1 2 3 4 5 1 2 1 2 3 4 5 1 2 3 4 5 6 1 2 3 4 5 6 7 1 2 -->
+<!--  [33] 3 4 5 6 1 2 3 -->
+
+```{r}
+data(DTI)
+  MS <- subset(DTI, case ==1)  # subset data with multiple sclerosis (MS) case
+
+  index.na <- which(is.na(MS$cca))  
+  Y <- MS$cca; 
+  Y[index.na] <- fpca.sc(Y)$Yhat[index.na]; 
+  sum(is.na(Y))
+  id <- MS$ID 
+  visit.index <- MS$visit 
+  visit.time <- MS$visit.time/max(MS$visit.time)
+
+  lfpca.dti <- fpca.lfda(Y = Y, subject.index = id,  
+                         visit.index = visit.index, obsT = visit.time, 
+                         LongiModel.method = 'lme',
+                         mFPCA.pve = 0.95)
+                         
+  TT <- seq(0,1,length.out=41); ss = seq(0,1,length.out=93)
+
+  # estimated mean function
+  persp(x = ss, y = TT, z = t(lfpca.dti$bivariateSmoothMeanFunc),
+        xlab="s", ylab="visit times", zlab="estimated mean fn", col='light blue')
+        
+  # first three estimated marginal eigenfunctions
+  matplot(ss, lfpca.dti$mFPCA.efunctions[,1:3], type='l', xlab='s', ylab='estimated eigen fn')
+  
+  # predicted scores function corresponding to first two marginal PCs
+  matplot(TT, do.call(cbind, lapply(lfpca.dti$sFPCA.xiHat.bySubj, function(a) a[,1])),
+          xlab="visit time (T)", ylab="xi_hat(T)", main = "k = 1", type='l')
+  matplot(TT, do.call(cbind, lapply(lfpca.dti$sFPCA.xiHat.bySubj, function(a) a[,2])),
+          xlab="visit time (T)", ylab="xi_hat(T)", main = "k = 2", type='l')
+
+  # prediction of cca of first two subjects at T = 0, 0.5 and 1 (black, red, green)
+  matplot(ss, t(lfpca.dti$fitted.values.all[[1]][c(1,21,41),]), 
+         type='l', lty = 1, ylab="", xlab="s", main = "Subject = 1")    
+  matplot(ss, t(lfpca.dti$fitted.values.all[[2]][c(1,21,41),]), 
+         type='l', lty = 1, ylab="", xlab="s", main = "Subject = 2")    
+     
+```
+
